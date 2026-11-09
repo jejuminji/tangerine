@@ -5,3 +5,4 @@ __pycache__/
 data/
 *.xlsx
 streamlit*.log
+*.lnk
