@@ -6,7 +6,7 @@ import json
 import os
 import re
 from copy import copy
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -23,7 +23,8 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=True)
 DATA_DIR = BASE_DIR / os.getenv("ORDER_DATA_DIR", "data")
-WORK_FILE = DATA_DIR / "current_work.json"
+LEGACY_WORK_FILE = DATA_DIR / "current_work.json"
+KOREA_TIMEZONE = timezone(timedelta(hours=9))
 TEMPLATE_FILE = BASE_DIR / "26년 10월 12일.xlsx"
 PROMPT_FILE = BASE_DIR / "prompts" / "order_extraction.txt"
 DEFAULT_SENDER_NAME = "강명순"
@@ -63,7 +64,39 @@ class ExtractedBatch(BaseModel):
 
 
 def _now() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+    return datetime.now(KOREA_TIMEZONE).isoformat(timespec="seconds")
+
+
+def _today() -> str:
+    return datetime.now(KOREA_TIMEZONE).date().isoformat()
+
+
+def _work_file(work_date: str) -> Path:
+    # Validate the date before using it as a directory name.
+    folder = datetime.strptime(work_date, "%Y-%m-%d").date().isoformat()
+    return DATA_DIR / folder / "current_work.json"
+
+
+def _migrate_legacy_work() -> None:
+    if not LEGACY_WORK_FILE.exists():
+        return
+    contents = LEGACY_WORK_FILE.read_bytes()
+    data = json.loads(contents)
+    if not isinstance(data, dict) or not isinstance(data.get("messages"), list) or not isinstance(data.get("orders"), list):
+        raise ValueError("기존 작업의 messages 또는 orders 형식이 올바르지 않습니다.")
+    try:
+        updated = datetime.fromisoformat(data["updated_at"])
+        if updated.tzinfo is not None:
+            updated = updated.astimezone(KOREA_TIMEZONE)
+    except (KeyError, TypeError, ValueError):
+        updated = datetime.fromtimestamp(LEGACY_WORK_FILE.stat().st_mtime, KOREA_TIMEZONE)
+    destination = _work_file(updated.date().isoformat())
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with destination.open("xb") as archive:
+            archive.write(contents)
+    except FileExistsError:
+        pass  # Keep both the existing daily work and the original file intact.
 
 
 def _load_order_prompt() -> str:
@@ -76,10 +109,11 @@ def _load_order_prompt() -> str:
     return prompt
 
 
-def _empty_work() -> dict[str, Any]:
+def _empty_work(work_date: str | None = None) -> dict[str, Any]:
     now = _now()
     return {
         "version": 1,
+        "work_date": work_date or _today(),
         "work_id": uuid4().hex,
         "created_at": now,
         "updated_at": now,
@@ -88,28 +122,32 @@ def _empty_work() -> dict[str, Any]:
     }
 
 
-def _load_work() -> tuple[dict[str, Any], str | None]:
-    if not WORK_FILE.exists():
-        return _empty_work(), None
+def _load_work(work_date: str) -> tuple[dict[str, Any], str | None]:
+    work_file = _work_file(work_date)
     try:
-        data = json.loads(WORK_FILE.read_text(encoding="utf-8"))
-        if not isinstance(data.get("messages"), list) or not isinstance(data.get("orders"), list):
+        _migrate_legacy_work()
+        if not work_file.exists():
+            return _empty_work(work_date), None
+        data = json.loads(work_file.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("messages"), list) or not isinstance(data.get("orders"), list):
             raise ValueError("messages 또는 orders 형식이 올바르지 않습니다.")
+        data["work_date"] = work_date
         return data, None
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        return _empty_work(), f"저장된 작업을 읽지 못했습니다. 기존 파일은 덮어쓰지 않습니다: {exc}"
+        return _empty_work(work_date), f"저장된 작업을 읽지 못했습니다. 기존 파일은 덮어쓰지 않습니다: {exc}"
 
 
 def _save_work(work: dict[str, Any]) -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    work_file = _work_file(work["work_date"])
+    work_file.parent.mkdir(parents=True, exist_ok=True)
     work["updated_at"] = _now()
-    temporary = WORK_FILE.with_suffix(".tmp")
+    temporary = work_file.with_suffix(".tmp")
     try:
         temporary.write_text(
             json.dumps(work, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        temporary.replace(WORK_FILE)
+        temporary.replace(work_file)
     except OSError:
         if temporary.exists():
             temporary.unlink(missing_ok=True)
@@ -155,9 +193,11 @@ def _configure_page() -> None:
     )
 
 
-def _initialize_state() -> None:
-    if "work" not in st.session_state:
-        work, error = _load_work()
+def _initialize_state(work_date: str) -> None:
+    if "work" not in st.session_state or st.session_state.work.get("work_date") != work_date:
+        st.session_state.pop("orders_editor", None)
+        st.session_state.notice = None
+        work, error = _load_work(work_date)
         work_updated = False
         for row in work["orders"]:
             old_address = " ".join(
@@ -696,7 +736,7 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
 
 
 def _download_filename(include_pending: bool = False) -> str:
-    now = datetime.now()
+    now = datetime.fromisoformat(st.session_state.work["work_date"])
     suffix = "_확인필요포함" if include_pending else ""
     return f"{now.year % 100}년 {now.month}월 {now.day}일{suffix}.xlsx"
 
@@ -765,7 +805,25 @@ def _render_preview() -> None:
 
 def run_app() -> None:
     _configure_page()
-    _initialize_state()
+
+    today = _today()
+    previous_today = st.session_state.get("calendar_date", today)
+    if previous_today != today and st.session_state.get("work_date_selector") == datetime.fromisoformat(previous_today).date():
+        st.session_state.work_date_selector = datetime.fromisoformat(today).date()
+    st.session_state.calendar_date = today
+    if "work_date_selector" not in st.session_state:
+        st.session_state.work_date_selector = datetime.fromisoformat(today).date()
+    selected_date = st.date_input(
+        "작업 날짜",
+        value=None,
+        max_value=datetime.fromisoformat(today).date(),
+        key="work_date_selector",
+        help="날짜별로 자동 저장됩니다. 이전 날짜를 선택하면 그날의 주문을 다시 열 수 있습니다.",
+    )
+    if selected_date is None:
+        st.info("작업 날짜를 선택해 주세요.")
+        return
+    _initialize_state(selected_date.isoformat())
 
     st.markdown('<div class="step-label">카카오톡 주문 정리</div>', unsafe_allow_html=True)
     st.title("주문 내용을 붙여넣어 주세요")
@@ -870,7 +928,7 @@ def run_app() -> None:
                 key="download_all",
             )
         st.caption(
-            f"양식: {TEMPLATE_FILE.name} · 작업은 {WORK_FILE.relative_to(BASE_DIR)}에 자동 저장됩니다."
+            f"양식: {TEMPLATE_FILE.name} · {st.session_state.work['work_date']} 작업 자동 저장"
         )
 
 
