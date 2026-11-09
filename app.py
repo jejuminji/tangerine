@@ -716,6 +716,10 @@ def _render_preview() -> None:
             width="stretch",
             hide_index=True,
             height=365,
+            column_config={
+                "상태": st.column_config.TextColumn("상태", width=100),
+                "수량": st.column_config.NumberColumn("수량", min_value=1, step=1, width=38),
+            },
         )
         return
 
@@ -736,10 +740,10 @@ def _render_preview() -> None:
                 help="필수값을 확인한 뒤 체크하세요.",
                 width="small",
             ),
-            "상태": st.column_config.TextColumn("상태", width="medium"),
+            "상태": st.column_config.TextColumn("상태", width=100),
             "수하인명": st.column_config.TextColumn("수하인명", width="small"),
             "수하인전화": st.column_config.TextColumn("수하인전화", width="medium"),
-            "수량": st.column_config.NumberColumn("수량", min_value=1, step=1, width="small"),
+            "수량": st.column_config.NumberColumn("수량", min_value=1, step=1, width=38),
             "주소": st.column_config.TextColumn("주소", width="large"),
             "송하인명": st.column_config.TextColumn("송하인명", width="small"),
             "송하인전화": st.column_config.TextColumn("송하인전화", width="medium"),
