@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Font, PatternFill
 
 import app
 
@@ -100,6 +100,7 @@ class SpecExportTests(unittest.TestCase):
             sheet["H2"].font = Font(bold=True, color="FF8800")
             sheet["H2"].alignment = Alignment(horizontal="center")
             sheet["H20"] = "Old example to remove"
+            sheet.column_dimensions["D"].fill = PatternFill(fill_type="solid", fgColor="DDEEF3")
             workbook.save(template)
             default_row = make_order_row()
             default_row.pop("규격")
@@ -121,7 +122,8 @@ class SpecExportTests(unittest.TestCase):
         self.assertTrue(exported["D4"].font.bold)
         self.assertEqual(exported["D4"].font.color.rgb, "00000000")
         self.assertEqual(exported["D4"].number_format, "0")
-        self.assertEqual(exported["D4"].fill.fgColor.rgb, "00FFF1DF")
+        self.assertTrue(all(exported.cell(4, column).fill.patternType is None for column in range(2, 9)))
+        self.assertIsNone(exported.column_dimensions["D"].fill.patternType)
         self.assertFalse(exported.row_dimensions[4].hidden)
         self.assertIsNone(exported["B4"].value)
         self.assertIsNone(exported["H4"].value)

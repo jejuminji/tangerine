@@ -861,6 +861,8 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
     if "Sheet2" not in workbook.sheetnames:
         raise ValueError("엑셀 양식에 Sheet2 시트가 없습니다.")
     sheet = workbook["Sheet2"]
+    # Column defaults also color empty cells below the last populated row.
+    sheet.column_dimensions["D"].fill = PatternFill(fill_type=None)
 
     # 양식의 첫 데이터 행 서식을 보존한 뒤, 실제 개인정보가 든 기존 행은 모두 제거한다.
     style_source = [sheet.cell(row=2, column=column) for column in range(2, 9)]
@@ -896,7 +898,7 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
         font.bold = True
         font.color = "000000"
         cell.font = font
-        cell.fill = PatternFill(fill_type="solid", fgColor="FFF1DF")
+        cell.fill = PatternFill(fill_type=None)
         border = copy(cell.border)
         border.top = Side(style="thin", color="999999")
         cell.border = border
