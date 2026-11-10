@@ -40,12 +40,12 @@ if not exist "logs\streamlit" (
 )
 
 echo Starting Tangerine. Close this window or press Ctrl+C to stop.
-echo Streamlit logs: logs\streamlit\streamlit.out.log and streamlit.err.log
+echo Each run saves its logs in a separate folder under logs\streamlit.
 ".venv\Scripts\python.exe" -u run_streamlit.py
 if errorlevel 1 (
     echo.
     echo [ERROR] Tangerine could not start.
-    echo See logs\streamlit\streamlit.err.log for details.
+    echo Check the message above and the latest folder under logs\streamlit.
     pause
     exit /b 1
 )
