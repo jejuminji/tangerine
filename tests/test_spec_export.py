@@ -63,7 +63,7 @@ class SpecExportTests(unittest.TestCase):
             frame = app._editor_frame()
         columns = list(frame.columns)
         self.assertEqual(columns[columns.index("송하인전화") + 1], "규격")
-        self.assertEqual(frame.loc[0, "규격"], "10kg")
+        self.assertEqual(frame.loc[0, "규격"], "감귤10kg")
 
     def test_existing_approved_order_gets_default_without_losing_approval(self):
         row = make_order_row()
@@ -74,7 +74,7 @@ class SpecExportTests(unittest.TestCase):
         state = SessionState(work=work, load_error=None)
         with patch.object(app.st, "session_state", state), patch.object(app, "_save_work") as save:
             app._initialize_state("2026-11-10")
-        self.assertEqual(row["규격"], "10kg")
+        self.assertEqual(row["규격"], "감귤10kg")
         self.assertTrue(row["approved"])
         save.assert_called_once_with(work)
 
@@ -87,6 +87,18 @@ class SpecExportTests(unittest.TestCase):
         with patch.object(app.st, "session_state", state), patch.object(app, "_save_work"):
             app._initialize_state("2026-11-10")
         self.assertEqual(row["규격"], "5kg")
+
+    def test_old_default_spec_is_upgraded(self):
+        row = make_order_row()
+        row["규격"] = "10kg"
+        work = app._empty_work("2026-11-10")
+        work["orders"] = [row]
+        state = SessionState(work=work, load_error=None, orders_editor={"edited_rows": {}})
+        with patch.object(app.st, "session_state", state), patch.object(app, "_save_work") as save:
+            app._initialize_state("2026-11-10")
+        self.assertEqual(row["규격"], "감귤10kg")
+        self.assertNotIn("orders_editor", state)
+        save.assert_called_once_with(work)
 
     def test_export_writes_default_and_custom_specs_to_h_with_template_style(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -112,7 +124,7 @@ class SpecExportTests(unittest.TestCase):
                 result = app._build_template_excel([default_row, custom_row])
             exported = load_workbook(BytesIO(result))["Sheet2"]
         self.assertEqual(exported["H1"].value, "규격")
-        self.assertEqual(exported["H2"].value, "10kg")
+        self.assertEqual(exported["H2"].value, "감귤10kg")
         self.assertEqual(exported["H3"].value, "5kg")
         self.assertEqual(exported["G2"].value, default_row["송하인전화"])
         self.assertTrue(exported["H2"].font.bold)

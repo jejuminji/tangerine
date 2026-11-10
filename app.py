@@ -64,7 +64,7 @@ TEMPLATE_FILE = BASE_DIR / "예시엑셀.xlsx"
 PROMPT_FILE = BASE_DIR / "prompts" / "order_extraction.txt"
 DEFAULT_SENDER_NAME = "강명순"
 DEFAULT_SENDER_PHONE = "010-2689-6055"
-DEFAULT_SPEC = "10kg"
+DEFAULT_SPEC = "감귤10kg"
 
 TEMPLATE_COLUMNS = ["수하인명", "수하인전화", "수량", "주소", "송하인명", "송하인전화", "규격"]
 VISIBLE_COLUMNS = ["삭제 선택", "검수완료", "상태", *TEMPLATE_COLUMNS, "확인할 내용"]
@@ -275,7 +275,7 @@ def _initialize_state(work_date: str) -> None:
         st.session_state.load_error = error
     defaults_updated = False
     for row in st.session_state.work["orders"]:
-        if "규격" not in row:
+        if "규격" not in row or row["규격"] == "10kg":
             row["규격"] = DEFAULT_SPEC
             defaults_updated = True
         sender_name = str(row.get("송하인명", "")).strip()
@@ -291,6 +291,7 @@ def _initialize_state(work_date: str) -> None:
             defaults_updated = True
     if defaults_updated and st.session_state.load_error is None:
         _save_work(st.session_state.work)
+        st.session_state.pop("orders_editor", None)
     address_candidates_updated = False
     for row in st.session_state.work["orders"]:
         address, candidates, reasons = _merge_address_candidates(
