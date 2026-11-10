@@ -235,6 +235,7 @@ def _configure_page() -> None:
 def _initialize_state(work_date: str) -> None:
     if "work" not in st.session_state or st.session_state.work.get("work_date") != work_date:
         st.session_state.pop("orders_editor", None)
+        st.session_state.delete_order_ids = set()
         st.session_state.notice = None
         work, error = _load_work(work_date)
         work_updated = False
@@ -673,10 +674,11 @@ def _counts() -> tuple[int, int, int, int]:
 
 def _editor_frame(include_total: bool = False) -> pd.DataFrame:
     rows = st.session_state.work["orders"]
+    selected_ids = st.session_state.get("delete_order_ids", set())
     records = [
         {
             column: (
-                False
+                row.get("order_id") in selected_ids
                 if column == "삭제 선택"
                 else bool(row.get("approved"))
                 if column == "검수완료"
@@ -700,9 +702,15 @@ def _clean_editor_value(column: str, value: Any) -> Any:
     return str(value)
 
 
-def _apply_editor_changes(edited: pd.DataFrame) -> None:
+def _apply_editor_changes(edited: pd.DataFrame, *, rerun: bool = True) -> None:
+    previous_selected_ids = st.session_state.get("delete_order_ids", set())
+    st.session_state.delete_order_ids = {
+        st.session_state.work["orders"][index]["order_id"]
+        for index, row in edited.iterrows()
+        if bool(row["삭제 선택"])
+    }
     changed = False
-    rerun_needed = False
+    rerun_needed = previous_selected_ids != st.session_state.delete_order_ids
     for index, row in edited.iterrows():
         stored = st.session_state.work["orders"][index]
         requested_approval = bool(row["검수완료"])
@@ -754,7 +762,22 @@ def _apply_editor_changes(edited: pd.DataFrame) -> None:
             return
     if rerun_needed:
         st.session_state.pop("orders_editor", None)
-        st.rerun()
+        if rerun:
+            st.rerun()
+
+
+def _toggle_all_delete() -> None:
+    st.session_state.delete_order_ids = (
+        {row["order_id"] for row in st.session_state.work["orders"]}
+        if st.session_state.bulk_delete else set()
+    )
+    st.session_state.pop("orders_editor", None)
+
+
+def _toggle_all_approval() -> None:
+    edited = _editor_frame()
+    edited["검수완료"] = st.session_state.bulk_approval
+    _apply_editor_changes(edited, rerun=False)
 
 
 def _delete_selected_orders(edited: pd.DataFrame) -> None:
@@ -782,6 +805,7 @@ def _delete_selected_orders(edited: pd.DataFrame) -> None:
         "kind": "success",
         "text": f"선택한 주문 {deleted_count}건을 삭제했어요.",
     }
+    st.session_state.delete_order_ids = set()
     st.session_state.pop("orders_editor", None)
     st.rerun()
 
@@ -919,6 +943,27 @@ def _render_preview() -> None:
         "표에서 직접 입력하거나 지울 수 있고, 수정값이 자동 저장되어 그대로 엑셀에 들어갑니다. "
         "왼쪽 입력창을 접으면 표를 더 넓게 볼 수 있어요."
     )
+
+    selected_ids = st.session_state.get("delete_order_ids", set())
+    st.session_state.bulk_delete = bool(orders) and all(row["order_id"] in selected_ids for row in orders)
+    st.session_state.bulk_approval = bool(orders) and all(row.get("approved", False) for row in orders)
+    delete_column, approval_column = st.columns(2)
+    with delete_column:
+        st.toggle(
+            "삭제 전체선택",
+            key="bulk_delete",
+            on_change=_toggle_all_delete,
+            disabled=not orders,
+            help="삭제할 주문을 모두 선택하거나 해제합니다. 실제 삭제는 아래 삭제 버튼을 눌러 주세요.",
+        )
+    with approval_column:
+        st.toggle(
+            "검수완료 전체선택",
+            key="bulk_approval",
+            on_change=_toggle_all_approval,
+            disabled=not orders,
+            help="필수 입력값이 갖춰진 주문을 모두 검수완료 처리하거나 해제합니다.",
+        )
 
     if not orders:
         st.info("아직 주문이 없습니다. 왼쪽에 카카오톡 메시지를 붙여넣어 주세요.")
