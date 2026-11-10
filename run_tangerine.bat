@@ -30,10 +30,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
-".venv\Scripts\python.exe" -m streamlit run main.py
+if not exist "logs\streamlit" mkdir "logs\streamlit"
+if not exist "logs\streamlit" (
+    echo [ERROR] Could not create the Streamlit log folder.
+    pause
+    exit /b 1
+)
+
+echo Starting Tangerine. Close this window or press Ctrl+C to stop.
+echo Streamlit logs: logs\streamlit\streamlit.out.log and streamlit.err.log
+".venv\Scripts\python.exe" -m streamlit run main.py 1>>"logs\streamlit\streamlit.out.log" 2>>"logs\streamlit\streamlit.err.log"
 if errorlevel 1 (
     echo.
-    echo [ERROR] Tangerine could not start. Check the error above.
+    echo [ERROR] Tangerine could not start.
+    echo See logs\streamlit\streamlit.err.log for details.
     pause
     exit /b 1
 )
