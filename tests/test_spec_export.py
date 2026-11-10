@@ -38,6 +38,24 @@ def make_order_row():
 
 
 class SpecExportTests(unittest.TestCase):
+    def test_download_filename_uses_next_day_and_exported_box_total(self):
+        for work_date, expected_date in (
+            ("2026-11-10", "2026_11_11"),
+            ("2026-11-30", "2026_12_01"),
+            ("2026-12-31", "2027_01_01"),
+        ):
+            with self.subTest(work_date=work_date):
+                state = SessionState(work={"work_date": work_date})
+                with patch.object(app.st, "session_state", state):
+                    self.assertEqual(
+                        app._download_filename([{"수량": 20}, {"수량": 6}]),
+                        expected_date + "_26박스.xlsx",
+                    )
+                    self.assertEqual(
+                        app._download_filename([{"수량": 6}]),
+                        expected_date + "_6박스.xlsx",
+                    )
+
     def test_new_order_preview_places_default_spec_after_sender_phone(self):
         row = make_order_row()
         state = SessionState(work={"orders": [row]})

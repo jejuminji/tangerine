@@ -914,10 +914,9 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
     return output.getvalue()
 
 
-def _download_filename(include_pending: bool = False) -> str:
+def _download_filename(rows: list[dict[str, Any]]) -> str:
     export_date = datetime.fromisoformat(st.session_state.work["work_date"]) + timedelta(days=1)
-    suffix = "_확인필요포함" if include_pending else ""
-    return f"{export_date.year % 100}년 {export_date.month}월 {export_date.day}일{suffix}.xlsx"
+    return f"{export_date:%Y_%m_%d}_{_box_total(rows)}박스.xlsx"
 
 
 def _render_preview() -> None:
@@ -1077,7 +1076,7 @@ def run_app() -> None:
                 st.download_button(
                     "엑셀로 다운로드",
                     data=excel_data,
-                    file_name=_download_filename(),
+                    file_name=_download_filename(approved_rows),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     type="primary",
                     width="stretch",
@@ -1100,7 +1099,7 @@ def run_app() -> None:
                 st.download_button(
                     "확인 필요 포함 다운로드",
                     data=all_excel_data,
-                    file_name=_download_filename(include_pending=True),
+                    file_name=_download_filename(all_rows),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     width="stretch",
                     key="download_all",
