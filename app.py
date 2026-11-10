@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 import openai
 from openai import OpenAI
 from openpyxl import load_workbook
-from openpyxl.styles import Alignment, PatternFill, Side
+from openpyxl.styles import Alignment, Border, PatternFill
 from openpyxl.workbook.properties import CalcProperties
 from pydantic import BaseModel, Field
 
@@ -864,6 +864,7 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
     sheet = workbook["Sheet2"]
     # Column defaults also color empty cells below the last populated row.
     sheet.column_dimensions["D"].fill = PatternFill(fill_type=None)
+    sheet.column_dimensions["D"].border = Border()
 
     # 양식의 첫 데이터 행 서식을 보존한 뒤, 실제 개인정보가 든 기존 행은 모두 제거한다.
     style_source = [sheet.cell(row=2, column=column) for column in range(2, 9)]
@@ -900,9 +901,7 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
         font.color = "000000"
         cell.font = font
         cell.fill = PatternFill(fill_type=None)
-        border = copy(cell.border)
-        border.top = Side(style="thin", color="999999")
-        cell.border = border
+        cell.border = Border()
     sheet.cell(total_row, 3, "총수량")
     total_formula = f"=SUM(D2:D{total_row - 1})" if rows else "=SUM(0)"
     total_cell = sheet.cell(total_row, 4, total_formula)
