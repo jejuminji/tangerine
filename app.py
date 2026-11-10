@@ -7,11 +7,13 @@ import logging
 import os
 import re
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from copy import copy
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 import pandas as pd
@@ -43,6 +45,11 @@ if not logger.handlers:
         )
     )
     logger.addHandler(file_handler)
+if not any(type(handler) is logging.StreamHandler for handler in logger.handlers):
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S"))
+    logger.addHandler(console_handler)
+logger.propagate = False
 
 logger.info(
     "앱 시작 | Python=%s | OpenAI SDK=%s | 실행파일=%s",
@@ -497,15 +504,34 @@ def _usage_dict(response: Any) -> dict[str, Any]:
     }
 
 
-def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
+def _analyze_message(
+    raw_message: str,
+    progress: Callable[[str, float], None] | None = None,
+) -> tuple[int, dict[str, Any]]:
+    started = time.monotonic()
+    last_stage = ""
+    last_logged = -10.0
+
+    def report(stage: str) -> None:
+        nonlocal last_stage, last_logged
+        elapsed = time.monotonic() - started
+        if stage != last_stage or elapsed - last_logged >= 10:
+            logger.info("분석 진행 | %.1f초 | %s", elapsed, stage)
+            last_stage, last_logged = stage, elapsed
+        if progress is not None:
+            progress(stage, elapsed)
+
+    report("분석 설정 확인")
     work = st.session_state.work
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     model = os.getenv("OPENAI_MODEL", "").strip()
 
     if not api_key:
+        report("분석 중단: API 키 설정 필요")
         logger.error(".env 설정 오류 | OPENAI_API_KEY가 비어 있음")
         return 0, {"kind": "error", "text": ".env에 OPENAI_API_KEY를 입력해 주세요."}
     if not model:
+        report("분석 중단: 모델 설정 필요")
         logger.error(".env 설정 오류 | OPENAI_MODEL이 비어 있음")
         return 0, {"kind": "error", "text": ".env에 OPENAI_MODEL을 입력해 주세요."}
 
@@ -524,6 +550,7 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
         "error": None,
     }
     work["messages"].append(message_record)
+    report("입력 원문 저장 중")
     _save_work(work)  # 개인정보 원문을 API 호출 전에 먼저 보존한다.
 
     logger.info(
@@ -544,19 +571,30 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
                 "openai>=2.0.0,<3.0으로 업그레이드해 주세요."
             )
 
+        report("분석 지침 준비 중")
         prompt = _load_order_prompt()
         logger.info("프롬프트 로드 완료 | request_tag=%s | prompt_chars=%d",
                     request_tag, len(prompt))
 
         # reasoning 옵션은 추론 모델 전용일 수 있으므로 제거하여
         # gpt-4o 등 일반 모델에서도 요청 파라미터 오류가 나지 않게 한다.
-        response = client.responses.parse(
-            model=model,
-            instructions=prompt,
-            input=json.dumps({"kakao_message": raw_message}, ensure_ascii=False),
-            text_format=ExtractedBatch,
-            store=False,
-        )
+        report("AI 분석 응답 대기 중")
+        # Keep Streamlit updates on the main thread while the SDK waits for the response.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            request = executor.submit(
+                client.responses.parse,
+                model=model,
+                instructions=prompt,
+                input=json.dumps({"kakao_message": raw_message}, ensure_ascii=False),
+                text_format=ExtractedBatch,
+                store=False,
+            )
+            while not request.done():
+                wait([request], timeout=1.0)
+                if not request.done():
+                    report("AI 분석 응답 대기 중")
+            response = request.result()
+        report("AI 응답 수신 · 분석 결과 확인 중")
 
         response_id = getattr(response, "id", None)
         response_status = getattr(response, "status", None)
@@ -595,6 +633,7 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
                 f"응답 상태={response_status}, incomplete={incomplete}, refusal={refusal_text}"
             )
 
+        report("배송지별 주문표 정리 중")
         group_id = f"GRP-{uuid4().hex[:8].upper()}"
         new_rows = [_make_order_row(order, group_id, message_id) for order in parsed.orders]
         _apply_global_total_quantity(new_rows, raw_message)
@@ -604,6 +643,7 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
         message_record["ai_result"] = parsed.model_dump()
         message_record["order_ids"] = [row["order_id"] for row in new_rows]
         message_record["response_id"] = response_id
+        report(f"주문 {len(new_rows)}건 저장 중")
         _save_work(work)
 
         usage = message_record["usage"]
@@ -615,6 +655,7 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
             usage,
         )
 
+        report(f"분석 완료: 주문 {len(new_rows)}건")
         if not new_rows:
             return 0, {"kind": "warning", "text": "배송 주문을 찾지 못했어요. 원문을 확인해 주세요."}
         return len(new_rows), {
@@ -623,6 +664,7 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
         }
 
     except Exception as exc:  # SDK 오류 종류와 무관하게 기존 작업은 보존한다.
+        report(f"분석 실패: {type(exc).__name__}")
         error_type = type(exc).__name__
         error_message = str(exc)
         request_id = getattr(exc, "request_id", None)
@@ -655,6 +697,42 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
                 f"상세 로그: logs/tangerine.log"
             ),
         }
+
+def _analyze_with_progress(raw_message: str) -> tuple[int, dict[str, Any]]:
+    history: dict[str, Any] = {"events": [], "elapsed": 0.0, "state": "running"}
+    st.session_state.analysis_progress = history
+    status = st.status("주문 분석 중", expanded=True)
+    timer = status.empty()
+
+    def show(stage: str, elapsed: float) -> None:
+        history["elapsed"] = elapsed
+        timer.caption(f"경과 {elapsed:.0f}초 · {stage}")
+        if not history["events"] or history["events"][-1]["stage"] != stage:
+            history["events"].append({"stage": stage, "elapsed": elapsed})
+            status.write(f"{elapsed:.1f}초 · {stage}")
+
+    try:
+        result = _analyze_message(raw_message, progress=show)
+    except OSError:
+        show("작업 파일 저장 실패", history["elapsed"])
+        history["state"] = "error"
+        status.update(label="분석 실패", state="error")
+        logger.exception("분석 진행 중 작업 파일 저장 실패")
+        raise
+    history["state"] = "error" if result[1]["kind"] == "error" else "complete"
+    status.update(label="분석 실패" if history["state"] == "error" else "분석 완료", state=history["state"])
+    return result
+
+
+def _render_analysis_history() -> None:
+    history = st.session_state.get("analysis_progress")
+    if not history:
+        return
+    with st.expander("최근 분석 진행 로그", expanded=True):
+        for event in history["events"]:
+            st.write(f"{event['elapsed']:.1f}초 · {event['stage']}")
+        st.caption(f"총 경과 시간: {history['elapsed']:.1f}초")
+
 
 def _display_notice() -> None:
     notice = st.session_state.notice
@@ -1096,12 +1174,12 @@ def run_app() -> None:
                 st.warning("카카오톡 주문 내용을 먼저 붙여넣어 주세요.")
             else:
                 try:
-                    with st.spinner("AI가 배송 정보를 읽고 있어요…"):
-                        _, notice = _analyze_message(raw_message)
+                    _, notice = _analyze_with_progress(raw_message)
                     st.session_state.notice = notice
                     st.rerun()
                 except OSError as exc:
                     st.error(f"원문을 저장하지 못해 분석을 시작하지 않았어요: {exc}")
+        _render_analysis_history()
 
     with st.container():
         _render_preview()

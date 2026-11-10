@@ -1,5 +1,7 @@
 @echo off
 setlocal
+chcp 65001 >nul
+set "PYTHONIOENCODING=utf-8"
 cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
@@ -39,7 +41,7 @@ if not exist "logs\streamlit" (
 
 echo Starting Tangerine. Close this window or press Ctrl+C to stop.
 echo Streamlit logs: logs\streamlit\streamlit.out.log and streamlit.err.log
-".venv\Scripts\python.exe" -m streamlit run main.py --server.address=127.0.0.1 --browser.serverAddress=localhost 1>>"logs\streamlit\streamlit.out.log" 2>>"logs\streamlit\streamlit.err.log"
+".venv\Scripts\python.exe" -u run_streamlit.py
 if errorlevel 1 (
     echo.
     echo [ERROR] Tangerine could not start.
