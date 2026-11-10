@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 data/
 *.xlsx
+!예시엑셀.xlsx
 streamlit*.log
 logs/
 *.lnk
