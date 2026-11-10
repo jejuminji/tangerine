@@ -87,6 +87,7 @@ class SpecExportTests(unittest.TestCase):
             default_row.pop("규격")
             custom_row = make_order_row()
             custom_row["규격"] = "5kg"
+            custom_row["수량"] = 3
             with patch.object(app, "TEMPLATE_FILE", template):
                 result = app._build_template_excel([default_row, custom_row])
             exported = load_workbook(BytesIO(result))["Sheet2"]
@@ -96,7 +97,32 @@ class SpecExportTests(unittest.TestCase):
         self.assertEqual(exported["G2"].value, default_row["송하인전화"])
         self.assertTrue(exported["H2"].font.bold)
         self.assertEqual(exported["H3"].alignment.horizontal, "center")
-        self.assertEqual(exported.max_row, 3)
+        self.assertEqual(exported.max_row, 4)
+        self.assertEqual(exported["C4"].value, "총수량")
+        self.assertEqual(exported["D4"].value, 4)
+        self.assertTrue(exported["D4"].font.bold)
+        self.assertEqual(exported["D4"].font.color.rgb, "00000000")
+        self.assertEqual(exported["D4"].number_format, "0")
+        self.assertEqual(exported["D4"].fill.fgColor.rgb, "00FFF1DF")
+        self.assertFalse(exported.row_dimensions[4].hidden)
+        self.assertIsNone(exported["B4"].value)
+        self.assertIsNone(exported["H4"].value)
+
+    def test_preview_total_does_not_add_or_modify_orders(self):
+        rows = [make_order_row(), make_order_row()]
+        rows[1]["수량"] = 3
+        self.assertEqual(app._box_total(rows), 4)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["수량"] for row in rows], [1, 3])
+        self.assertEqual(app._box_total([]), 0)
+        with patch.object(app.st, "session_state", SessionState(work={"orders": rows})):
+            preview = app._editor_frame(include_total=True)
+        self.assertEqual(len(preview), 3)
+        self.assertEqual(preview.iloc[-1]["수하인전화"], "총수량")
+        self.assertEqual(preview.iloc[-1]["수량"], 4)
+        self.assertFalse(preview.iloc[-1]["검수완료"])
+        self.assertFalse(preview.iloc[-1]["삭제 선택"])
+        self.assertEqual(len(rows), 2)
 
 
 if __name__ == "__main__":

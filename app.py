@@ -20,6 +20,7 @@ from dotenv import load_dotenv
 import openai
 from openai import OpenAI
 from openpyxl import load_workbook
+from openpyxl.styles import Alignment, PatternFill, Side
 from pydantic import BaseModel, Field
 
 
@@ -681,23 +682,24 @@ def _counts() -> tuple[int, int, int, int]:
     return len(orders), attention, waiting, approved
 
 
-def _editor_frame() -> pd.DataFrame:
+def _editor_frame(include_total: bool = False) -> pd.DataFrame:
     rows = st.session_state.work["orders"]
-    return pd.DataFrame(
-        [
-            {
-                column: (
-                    False
-                    if column == "삭제 선택"
-                    else bool(row.get("approved"))
-                    if column == "검수완료"
-                    else row.get(column)
-                )
-                for column in VISIBLE_COLUMNS
-            }
-            for row in rows
-        ]
-    )
+    records = [
+        {
+            column: (
+                False
+                if column == "삭제 선택"
+                else bool(row.get("approved"))
+                if column == "검수완료"
+                else row.get(column)
+            )
+            for column in VISIBLE_COLUMNS
+        }
+        for row in rows
+    ]
+    if include_total:
+        records.append(_total_preview_row(rows))
+    return pd.DataFrame(records, columns=VISIBLE_COLUMNS)
 
 
 def _clean_editor_value(column: str, value: Any) -> Any:
@@ -831,6 +833,26 @@ def _approved_orders() -> list[dict[str, Any]]:
     return unique
 
 
+def _box_total(rows: list[dict[str, Any]]) -> int:
+    return sum(
+        quantity
+        for row in rows
+        if isinstance(quantity := row.get("수량", 1), int) and quantity > 0
+    )
+
+
+def _total_preview_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total = {column: "" for column in VISIBLE_COLUMNS}
+    total.update({
+        "삭제 선택": False,
+        "검수완료": False,
+        "수하인전화": "총수량",
+        "수량": _box_total(rows),
+        "확인할 내용": "자동 계산",
+    })
+    return total
+
+
 def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
     if not TEMPLATE_FILE.exists():
         raise FileNotFoundError(f"엑셀 양식 파일을 찾을 수 없습니다: {TEMPLATE_FILE.name}")
@@ -866,6 +888,27 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
             if offset in (1, 5):
                 cell.number_format = "@"
 
+    total_row = len(rows) + 2
+    for offset in range(len(TEMPLATE_COLUMNS)):
+        cell = sheet.cell(row=total_row, column=offset + 2)
+        cell._style = copy(styles[offset])
+        font = copy(cell.font)
+        font.bold = True
+        font.color = "000000"
+        cell.font = font
+        cell.fill = PatternFill(fill_type="solid", fgColor="FFF1DF")
+        border = copy(cell.border)
+        border.top = Side(style="thin", color="999999")
+        cell.border = border
+    sheet.cell(total_row, 3, "총수량")
+    total_cell = sheet.cell(total_row, 4, _box_total(rows))
+    total_cell.number_format = "0"
+    total_cell.alignment = Alignment(horizontal="center", vertical="center")
+    sheet.row_dimensions[total_row].height = 24
+    sheet.row_dimensions[total_row].hidden = False
+    if sheet.print_area:
+        sheet.print_area = f"A1:H{total_row}"
+
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -879,7 +922,7 @@ def _download_filename(include_pending: bool = False) -> str:
 
 def _render_preview() -> None:
     orders = st.session_state.work["orders"]
-    st.subheader("2. 엑셀 미리보기")
+    st.subheader(f"2. 엑셀 미리보기 · 총 {_box_total(orders):,}박스")
     st.caption(
         "새 메시지를 읽을 때마다 아래 표에 계속 추가됩니다. 수하인·전화번호·수량·주소·송하인·규격은 "
         "표에서 직접 입력하거나 지울 수 있고, 수정값이 자동 저장되어 그대로 엑셀에 들어갑니다. "
@@ -889,55 +932,62 @@ def _render_preview() -> None:
     if not orders:
         st.info("아직 주문이 없습니다. 왼쪽에 카카오톡 메시지를 붙여넣어 주세요.")
         st.dataframe(
-            pd.DataFrame(columns=VISIBLE_COLUMNS),
+            _editor_frame(include_total=True),
             width="stretch",
             hide_index=True,
             height=600,
             column_config={
                 "상태": st.column_config.TextColumn("상태", width=100),
                 "수량": st.column_config.NumberColumn("수량", min_value=1, step=1, width=38),
+                "수하인전화": st.column_config.TextColumn("수하인전화", width=140),
             },
         )
         return
 
+    column_config = {
+        "삭제 선택": st.column_config.CheckboxColumn(
+            "삭제",
+            help="지울 주문을 선택한 뒤 아래 삭제 버튼을 누르세요.",
+            width="small",
+        ),
+        "검수완료": st.column_config.CheckboxColumn(
+            "검수완료",
+            help="필수값을 확인한 뒤 체크하세요.",
+            width="small",
+        ),
+        "상태": st.column_config.TextColumn("상태", width=100),
+        "수하인명": st.column_config.TextColumn("수하인명", width="small"),
+        "수하인전화": st.column_config.TextColumn("수하인전화", width=140),
+        "수량": st.column_config.NumberColumn("수량", min_value=1, step=1, width=38),
+        "주소": st.column_config.TextColumn("주소", width="large"),
+        "송하인명": st.column_config.TextColumn("송하인명", width="small"),
+        "송하인전화": st.column_config.TextColumn("송하인전화", width="medium"),
+        "규격": st.column_config.TextColumn("규격", width="small", default=DEFAULT_SPEC),
+        "확인할 내용": st.column_config.TextColumn("확인할 내용", width="large"),
+    }
     edited = st.data_editor(
-        _editor_frame(),
+        _editor_frame(include_total=True),
         width="stretch",
         hide_index=True,
         height=600,
         disabled=["상태", "확인할 내용"],
-        column_config={
-            "삭제 선택": st.column_config.CheckboxColumn(
-                "삭제",
-                help="지울 주문을 선택한 뒤 아래 삭제 버튼을 누르세요.",
-                width="small",
-            ),
-            "검수완료": st.column_config.CheckboxColumn(
-                "검수완료",
-                help="필수값을 확인한 뒤 체크하세요.",
-                width="small",
-            ),
-            "상태": st.column_config.TextColumn("상태", width=100),
-            "수하인명": st.column_config.TextColumn("수하인명", width="small"),
-            "수하인전화": st.column_config.TextColumn("수하인전화", width="medium"),
-            "수량": st.column_config.NumberColumn("수량", min_value=1, step=1, width=38),
-            "주소": st.column_config.TextColumn("주소", width="large"),
-            "송하인명": st.column_config.TextColumn("송하인명", width="small"),
-            "송하인전화": st.column_config.TextColumn("송하인전화", width="medium"),
-            "규격": st.column_config.TextColumn("규격", width="small", default=DEFAULT_SPEC),
-            "확인할 내용": st.column_config.TextColumn("확인할 내용", width="large"),
-        },
+        column_config=column_config,
         key="orders_editor",
     )
-    _apply_editor_changes(edited)
-    delete_count = int(edited["삭제 선택"].fillna(False).astype(bool).sum())
+    # Only real orders may be saved, approved, or deleted. Restore edits to the total row.
+    edited_orders = edited.iloc[:len(orders)]
+    _apply_editor_changes(edited_orders)
+    if edited.iloc[-1].to_dict() != _total_preview_row(orders):
+        st.session_state.pop("orders_editor", None)
+        st.rerun()
+    delete_count = int(edited_orders["삭제 선택"].fillna(False).astype(bool).sum())
     if st.button(
         f"선택한 행 삭제 ({delete_count}건)",
         disabled=delete_count == 0,
         width="stretch",
         key="delete_selected_orders",
     ):
-        _delete_selected_orders(edited)
+        _delete_selected_orders(edited_orders)
 
 
 
