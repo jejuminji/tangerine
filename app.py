@@ -192,7 +192,17 @@ def _configure_page() -> None:
         """
         <style>
             .stApp { background: #fffaf4; }
-            .block-container { max-width: 100%; padding-top: 1.7rem; }
+            [data-testid="stHeader"] {
+                height: 4rem !important;
+                background: #fff !important;
+            }
+            [data-testid="stMainBlockContainer"], .block-container {
+                max-width: 100%;
+                padding-top: 7rem !important;
+            }
+            [data-testid="stSidebarContent"] {
+                border-top: 4rem solid #fff;
+            }
             h1 { color: #3f3128; letter-spacing: -0.04em; }
             [data-testid="stMetric"] {
                 background: white; border: 1px solid #f0dfcf;
