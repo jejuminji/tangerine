@@ -498,18 +498,6 @@ def _usage_dict(response: Any) -> dict[str, Any]:
 
 def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
     work = st.session_state.work
-    existing = next(
-        (
-            item
-            for item in work["messages"]
-            if item.get("raw_text") == raw_message and item.get("status") == "success"
-        ),
-        None,
-    )
-    if existing:
-        logger.info("중복 원문 감지 | 기존 분석 결과 사용")
-        return 0, {"kind": "warning", "text": "이미 분석한 같은 원문이라 기존 결과를 사용했어요."}
-
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     model = os.getenv("OPENAI_MODEL", "").strip()
 
