@@ -1,8 +1,10 @@
 .env
 .venv/
+.venv-backup/
 __pycache__/
 *.py[cod]
 data/
 *.xlsx
 streamlit*.log
+logs/
 *.lnk

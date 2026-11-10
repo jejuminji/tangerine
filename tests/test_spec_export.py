@@ -1,0 +1,103 @@
+import tempfile
+import unittest
+from io import BytesIO
+from pathlib import Path
+from unittest.mock import patch
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Font
+
+import app
+
+
+class SessionState(dict):
+    def __getattr__(self, name):
+        return self[name]
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+
+def make_order_row():
+    extracted = app.ExtractedOrder(
+        sender_explicitly_stated=False,
+        sender="",
+        sender_phone="",
+        recipient="Test recipient",
+        phone="01012345678",
+        base_address="Test address",
+        detail_address="",
+        quantity_explicitly_stated=False,
+        quantity=None,
+        product_name="",
+        evidence="Test order",
+        review_reasons=[],
+        uncertain_candidates=[],
+    )
+    return app._make_order_row(extracted, "test-group", "test-message")
+
+
+class SpecExportTests(unittest.TestCase):
+    def test_new_order_preview_places_default_spec_after_sender_phone(self):
+        row = make_order_row()
+        state = SessionState(work={"orders": [row]})
+        with patch.object(app.st, "session_state", state):
+            frame = app._editor_frame()
+        columns = list(frame.columns)
+        self.assertEqual(columns[columns.index("송하인전화") + 1], "규격")
+        self.assertEqual(frame.loc[0, "규격"], "10kg")
+
+    def test_existing_approved_order_gets_default_without_losing_approval(self):
+        row = make_order_row()
+        row.pop("규격")
+        row["approved"] = True
+        work = app._empty_work("2026-11-10")
+        work["orders"] = [row]
+        state = SessionState(work=work, load_error=None)
+        with patch.object(app.st, "session_state", state), patch.object(app, "_save_work") as save:
+            app._initialize_state("2026-11-10")
+        self.assertEqual(row["규격"], "10kg")
+        self.assertTrue(row["approved"])
+        save.assert_called_once_with(work)
+
+    def test_existing_custom_spec_is_preserved(self):
+        row = make_order_row()
+        row["규격"] = "5kg"
+        work = app._empty_work("2026-11-10")
+        work["orders"] = [row]
+        state = SessionState(work=work, load_error=None)
+        with patch.object(app.st, "session_state", state), patch.object(app, "_save_work"):
+            app._initialize_state("2026-11-10")
+        self.assertEqual(row["규격"], "5kg")
+
+    def test_export_writes_default_and_custom_specs_to_h_with_template_style(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            template = Path(temporary) / "template.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Sheet2"
+            for column, title in enumerate(app.TEMPLATE_COLUMNS, start=2):
+                sheet.cell(1, column, title)
+            sheet["H2"] = "Old example"
+            sheet["H2"].font = Font(bold=True, color="FF8800")
+            sheet["H2"].alignment = Alignment(horizontal="center")
+            sheet["H20"] = "Old example to remove"
+            workbook.save(template)
+            default_row = make_order_row()
+            default_row.pop("규격")
+            custom_row = make_order_row()
+            custom_row["규격"] = "5kg"
+            with patch.object(app, "TEMPLATE_FILE", template):
+                result = app._build_template_excel([default_row, custom_row])
+            exported = load_workbook(BytesIO(result))["Sheet2"]
+        self.assertEqual(exported["H1"].value, "규격")
+        self.assertEqual(exported["H2"].value, "10kg")
+        self.assertEqual(exported["H3"].value, "5kg")
+        self.assertEqual(exported["G2"].value, default_row["송하인전화"])
+        self.assertTrue(exported["H2"].font.bold)
+        self.assertEqual(exported["H3"].alignment.horizontal, "center")
+        self.assertEqual(exported.max_row, 3)
+
+
+if __name__ == "__main__":
+    unittest.main()

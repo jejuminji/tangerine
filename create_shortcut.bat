@@ -7,6 +7,6 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo Tangerine.lnk created. Uses installed Python 3.10 without a virtual environment.
+echo Tangerine.lnk created. Uses the Python 3.13 virtual environment in .venv.
 echo Double-click its orange icon to start.
 pause

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import sys
 from copy import copy
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -15,6 +17,7 @@ from uuid import uuid4
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+import openai
 from openai import OpenAI
 from openpyxl import load_workbook
 from pydantic import BaseModel, Field
@@ -22,15 +25,39 @@ from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=True)
+
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "tangerine.log"
+
+logger = logging.getLogger("tangerine")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logger.addHandler(file_handler)
+
+logger.info(
+    "앱 시작 | Python=%s | OpenAI SDK=%s | 실행파일=%s",
+    sys.version.split()[0],
+    getattr(openai, "__version__", "unknown"),
+    Path(__file__).name,
+)
 DATA_DIR = BASE_DIR / os.getenv("ORDER_DATA_DIR", "data")
 LEGACY_WORK_FILE = DATA_DIR / "current_work.json"
 KOREA_TIMEZONE = timezone(timedelta(hours=9))
-TEMPLATE_FILE = BASE_DIR / "26년 10월 12일.xlsx"
+TEMPLATE_FILE = BASE_DIR / "예시엑셀.xlsx"
 PROMPT_FILE = BASE_DIR / "prompts" / "order_extraction.txt"
 DEFAULT_SENDER_NAME = "강명순"
 DEFAULT_SENDER_PHONE = "010-2689-6055"
+DEFAULT_SPEC = "10kg"
 
-TEMPLATE_COLUMNS = ["수하인명", "수하인전화", "수량", "주소", "송하인명", "송하인전화"]
+TEMPLATE_COLUMNS = ["수하인명", "수하인전화", "수량", "주소", "송하인명", "송하인전화", "규격"]
 VISIBLE_COLUMNS = ["삭제 선택", "검수완료", "상태", *TEMPLATE_COLUMNS, "확인할 내용"]
 EDITABLE_COLUMNS = TEMPLATE_COLUMNS
 
@@ -159,13 +186,13 @@ def _configure_page() -> None:
         page_title="카카오톡 주문 정리",
         page_icon="🍊",
         layout="wide",
-        initial_sidebar_state="collapsed",
+        initial_sidebar_state="expanded",
     )
     st.markdown(
         """
         <style>
             .stApp { background: #fffaf4; }
-            .block-container { max-width: 1500px; padding-top: 1.7rem; }
+            .block-container { max-width: 100%; padding-top: 1.7rem; }
             h1 { color: #3f3128; letter-spacing: -0.04em; }
             [data-testid="stMetric"] {
                 background: white; border: 1px solid #f0dfcf;
@@ -226,20 +253,23 @@ def _initialize_state(work_date: str) -> None:
             _save_work(work)
         st.session_state.work = work
         st.session_state.load_error = error
-    sender_defaults_updated = False
+    defaults_updated = False
     for row in st.session_state.work["orders"]:
+        if "규격" not in row:
+            row["규격"] = DEFAULT_SPEC
+            defaults_updated = True
         sender_name = str(row.get("송하인명", "")).strip()
         sender_phone = str(row.get("송하인전화", "")).strip()
         if not sender_name:
             row["송하인명"] = DEFAULT_SENDER_NAME
             row["송하인전화"] = DEFAULT_SENDER_PHONE
             _refresh_row_status(row)
-            sender_defaults_updated = True
+            defaults_updated = True
         elif sender_name == DEFAULT_SENDER_NAME and not sender_phone:
             row["송하인전화"] = DEFAULT_SENDER_PHONE
             _refresh_row_status(row)
-            sender_defaults_updated = True
-    if sender_defaults_updated and st.session_state.load_error is None:
+            defaults_updated = True
+    if defaults_updated and st.session_state.load_error is None:
         _save_work(st.session_state.work)
     address_candidates_updated = False
     for row in st.session_state.work["orders"]:
@@ -424,6 +454,7 @@ def _make_order_row(order: ExtractedOrder, group_id: str, message_id: str) -> di
         "주소": extracted_address,
         "송하인명": sender_name,
         "송하인전화": sender_phone,
+        "규격": DEFAULT_SPEC,
         "수하인전화 원문": order.phone.strip(),
         "송하인전화 원문": order.sender_phone.strip(),
         "상품명": order.product_name.strip(),
@@ -464,16 +495,21 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
         None,
     )
     if existing:
+        logger.info("중복 원문 감지 | 기존 분석 결과 사용")
         return 0, {"kind": "warning", "text": "이미 분석한 같은 원문이라 기존 결과를 사용했어요."}
 
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
     model = os.getenv("OPENAI_MODEL", "").strip()
+
     if not api_key:
+        logger.error(".env 설정 오류 | OPENAI_API_KEY가 비어 있음")
         return 0, {"kind": "error", "text": ".env에 OPENAI_API_KEY를 입력해 주세요."}
     if not model:
+        logger.error(".env 설정 오류 | OPENAI_MODEL이 비어 있음")
         return 0, {"kind": "error", "text": ".env에 OPENAI_MODEL을 입력해 주세요."}
 
     message_id = uuid4().hex
+    request_tag = message_id[:12]
     message_record: dict[str, Any] = {
         "message_id": message_id,
         "raw_text": raw_message,
@@ -489,19 +525,74 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
     work["messages"].append(message_record)
     _save_work(work)  # 개인정보 원문을 API 호출 전에 먼저 보존한다.
 
+    logger.info(
+        "OpenAI 호출 시작 | request_tag=%s | model=%s | message_chars=%d | SDK=%s",
+        request_tag,
+        model,
+        len(raw_message),
+        getattr(openai, "__version__", "unknown"),
+    )
+
     try:
         client = OpenAI(api_key=api_key, max_retries=0, timeout=90.0)
+
+        # responses.parse는 OpenAI Python SDK 2.x 사용을 전제로 한다.
+        if not hasattr(client, "responses") or not hasattr(client.responses, "parse"):
+            raise RuntimeError(
+                "현재 OpenAI SDK에 responses.parse가 없습니다. "
+                "openai>=2.0.0,<3.0으로 업그레이드해 주세요."
+            )
+
+        prompt = _load_order_prompt()
+        logger.info("프롬프트 로드 완료 | request_tag=%s | prompt_chars=%d",
+                    request_tag, len(prompt))
+
+        # reasoning 옵션은 추론 모델 전용일 수 있으므로 제거하여
+        # gpt-4o 등 일반 모델에서도 요청 파라미터 오류가 나지 않게 한다.
         response = client.responses.parse(
             model=model,
-            instructions=_load_order_prompt(),
+            instructions=prompt,
             input=json.dumps({"kakao_message": raw_message}, ensure_ascii=False),
             text_format=ExtractedBatch,
-            reasoning={"effort": "low"},
             store=False,
         )
-        parsed = response.output_parsed
+
+        response_id = getattr(response, "id", None)
+        response_status = getattr(response, "status", None)
+        parsed = getattr(response, "output_parsed", None)
+
+        logger.info(
+            "OpenAI 응답 수신 | request_tag=%s | response_id=%s | status=%s | parsed=%s",
+            request_tag,
+            response_id,
+            response_status,
+            parsed is not None,
+        )
+
         if parsed is None:
-            raise ValueError("AI가 분석 결과를 반환하지 않았습니다.")
+            incomplete = getattr(response, "incomplete_details", None)
+            refusal_text = None
+            try:
+                for output_item in getattr(response, "output", []) or []:
+                    for content_item in getattr(output_item, "content", []) or []:
+                        if getattr(content_item, "type", None) == "refusal":
+                            refusal_text = getattr(content_item, "refusal", None)
+                            break
+            except Exception:
+                logger.exception("응답 세부정보 확인 중 오류 | request_tag=%s", request_tag)
+
+            logger.error(
+                "구조화 결과 없음 | request_tag=%s | response_id=%s | status=%s | incomplete=%s | refusal=%s",
+                request_tag,
+                response_id,
+                response_status,
+                str(incomplete)[:500],
+                str(refusal_text)[:300] if refusal_text else None,
+            )
+            raise ValueError(
+                "AI 응답에 주문 분석 결과가 없습니다. "
+                f"응답 상태={response_status}, incomplete={incomplete}, refusal={refusal_text}"
+            )
 
         group_id = f"GRP-{uuid4().hex[:8].upper()}"
         new_rows = [_make_order_row(order, group_id, message_id) for order in parsed.orders]
@@ -511,7 +602,17 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
         message_record["usage"] = _usage_dict(response)
         message_record["ai_result"] = parsed.model_dump()
         message_record["order_ids"] = [row["order_id"] for row in new_rows]
+        message_record["response_id"] = response_id
         _save_work(work)
+
+        usage = message_record["usage"]
+        logger.info(
+            "OpenAI 분석 성공 | request_tag=%s | response_id=%s | orders=%d | usage=%s",
+            request_tag,
+            response_id,
+            len(new_rows),
+            usage,
+        )
 
         if not new_rows:
             return 0, {"kind": "warning", "text": "배송 주문을 찾지 못했어요. 원문을 확인해 주세요."}
@@ -519,16 +620,40 @@ def _analyze_message(raw_message: str) -> tuple[int, dict[str, Any]]:
             "kind": "success",
             "text": f"배송지 {len(new_rows)}건을 읽어 기존 주문표에 추가했어요.",
         }
+
     except Exception as exc:  # SDK 오류 종류와 무관하게 기존 작업은 보존한다.
+        error_type = type(exc).__name__
+        error_message = str(exc)
+        request_id = getattr(exc, "request_id", None)
+
+        logger.exception(
+            "OpenAI 분석 실패 | request_tag=%s | model=%s | error_type=%s | request_id=%s",
+            request_tag,
+            model,
+            error_type,
+            request_id,
+        )
+
         message_record["status"] = "failed"
-        message_record["error"] = f"{type(exc).__name__}: {str(exc)[:500]}"
-        _save_work(work)
+        message_record["error"] = (
+            f"{error_type}: {error_message[:700]}"
+            + (f" | request_id={request_id}" if request_id else "")
+        )
+        message_record["request_id"] = request_id
+        try:
+            _save_work(work)
+        except Exception:
+            logger.exception("실패 상태 저장 중 추가 오류 | request_tag=%s", request_tag)
+
         return 0, {
             "kind": "error",
-            "text": "AI 분석에 실패했어요. 기존 주문은 그대로 유지했습니다. "
-            f"({type(exc).__name__}: {str(exc)[:240]})",
+            "text": (
+                f"AI 분석에 실패했어요. 기존 주문은 유지했습니다. "
+                f"오류: {error_type}: {error_message[:300]} "
+                f"(추적번호: {request_tag}) "
+                f"상세 로그: logs/tangerine.log"
+            ),
         }
-
 
 def _display_notice() -> None:
     notice = st.session_state.notice
@@ -706,7 +831,7 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
     sheet = workbook["Sheet2"]
 
     # 양식의 첫 데이터 행 서식을 보존한 뒤, 실제 개인정보가 든 기존 행은 모두 제거한다.
-    style_source = [sheet.cell(row=2, column=column) for column in range(2, 8)]
+    style_source = [sheet.cell(row=2, column=column) for column in range(2, 9)]
     styles = [copy(cell._style) for cell in style_source]
     alignments = [copy(cell.alignment) for cell in style_source]
     protections = [copy(cell.protection) for cell in style_source]
@@ -721,6 +846,7 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
             _safe_excel_text(order.get("주소")),
             _safe_excel_text(order.get("송하인명")),
             _safe_excel_text(order.get("송하인전화")),
+            _safe_excel_text(order.get("규격", DEFAULT_SPEC)),
         ]
         for offset, value in enumerate(values):
             cell = sheet.cell(row=row_number, column=offset + 2, value=value)
@@ -736,17 +862,18 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
 
 
 def _download_filename(include_pending: bool = False) -> str:
-    now = datetime.fromisoformat(st.session_state.work["work_date"])
+    export_date = datetime.fromisoformat(st.session_state.work["work_date"]) + timedelta(days=1)
     suffix = "_확인필요포함" if include_pending else ""
-    return f"{now.year % 100}년 {now.month}월 {now.day}일{suffix}.xlsx"
+    return f"{export_date.year % 100}년 {export_date.month}월 {export_date.day}일{suffix}.xlsx"
 
 
 def _render_preview() -> None:
     orders = st.session_state.work["orders"]
     st.subheader("2. 엑셀 미리보기")
     st.caption(
-        "새 메시지를 읽을 때마다 아래 표에 계속 추가됩니다. 수하인·전화번호·수량·주소·송하인은 "
-        "표에서 직접 입력하거나 지울 수 있고, 수정값이 자동 저장되어 그대로 엑셀에 들어갑니다."
+        "새 메시지를 읽을 때마다 아래 표에 계속 추가됩니다. 수하인·전화번호·수량·주소·송하인·규격은 "
+        "표에서 직접 입력하거나 지울 수 있고, 수정값이 자동 저장되어 그대로 엑셀에 들어갑니다. "
+        "왼쪽 입력창을 접으면 표를 더 넓게 볼 수 있어요."
     )
 
     if not orders:
@@ -755,7 +882,7 @@ def _render_preview() -> None:
             pd.DataFrame(columns=VISIBLE_COLUMNS),
             width="stretch",
             hide_index=True,
-            height=365,
+            height=600,
             column_config={
                 "상태": st.column_config.TextColumn("상태", width=100),
                 "수량": st.column_config.NumberColumn("수량", min_value=1, step=1, width=38),
@@ -767,7 +894,7 @@ def _render_preview() -> None:
         _editor_frame(),
         width="stretch",
         hide_index=True,
-        height=430,
+        height=600,
         disabled=["상태", "확인할 내용"],
         column_config={
             "삭제 선택": st.column_config.CheckboxColumn(
@@ -787,6 +914,7 @@ def _render_preview() -> None:
             "주소": st.column_config.TextColumn("주소", width="large"),
             "송하인명": st.column_config.TextColumn("송하인명", width="small"),
             "송하인전화": st.column_config.TextColumn("송하인전화", width="medium"),
+            "규격": st.column_config.TextColumn("규격", width="small", default=DEFAULT_SPEC),
             "확인할 내용": st.column_config.TextColumn("확인할 내용", width="large"),
         },
         key="orders_editor",
@@ -805,6 +933,7 @@ def _render_preview() -> None:
 
 def run_app() -> None:
     _configure_page()
+    logger.info("화면 렌더링 시작")
 
     today = _today()
     previous_today = st.session_state.get("calendar_date", today)
@@ -826,8 +955,8 @@ def run_app() -> None:
     _initialize_state(selected_date.isoformat())
 
     st.markdown('<div class="step-label">카카오톡 주문 정리</div>', unsafe_allow_html=True)
-    st.title("주문 내용을 붙여넣어 주세요")
-    st.caption("메시지 한 묶음씩 붙여넣고 주문 읽어오기를 누르면 주문표에 계속 누적됩니다.")
+    st.title("주문표를 확인해 주세요")
+    st.caption("왼쪽 입력창에 메시지를 붙여넣고 주문 읽어오기를 누르면 아래 주문표에 계속 누적됩니다.")
 
     if st.session_state.load_error:
         st.error(st.session_state.load_error)
@@ -844,8 +973,7 @@ def run_app() -> None:
         column.metric(label, value)
 
     st.write("")
-    left, right = st.columns([0.8, 1.7], gap="large")
-    with left:
+    with st.sidebar:
         st.subheader("1. 카카오톡 메시지")
         st.text_area(
             "주문 메시지 붙여넣기",
@@ -879,7 +1007,7 @@ def run_app() -> None:
                 except OSError as exc:
                     st.error(f"원문을 저장하지 못해 분석을 시작하지 않았어요: {exc}")
 
-    with right:
+    with st.container():
         _render_preview()
         approved_rows = _approved_orders()
         st.info(f"확인 완료한 {len(approved_rows)}건만 양식에 맞춰 엑셀로 저장됩니다.")
