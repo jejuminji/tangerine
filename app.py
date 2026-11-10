@@ -21,6 +21,7 @@ import openai
 from openai import OpenAI
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, PatternFill, Side
+from openpyxl.workbook.properties import CalcProperties
 from pydantic import BaseModel, Field
 
 
@@ -903,7 +904,8 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
         border.top = Side(style="thin", color="999999")
         cell.border = border
     sheet.cell(total_row, 3, "총수량")
-    total_cell = sheet.cell(total_row, 4, _box_total(rows))
+    total_formula = f"=SUM(D2:D{total_row - 1})" if rows else "=SUM(0)"
+    total_cell = sheet.cell(total_row, 4, total_formula)
     total_cell.number_format = "0"
     total_cell.alignment = Alignment(horizontal="center", vertical="center")
     sheet.row_dimensions[total_row].height = 24
@@ -911,6 +913,7 @@ def _build_template_excel(rows: list[dict[str, Any]]) -> bytes:
     if sheet.print_area:
         sheet.print_area = f"A1:H{total_row}"
 
+    workbook.calculation = CalcProperties(calcMode="auto", fullCalcOnLoad=True, forceFullCalc=True)
     output = BytesIO()
     workbook.save(output)
     return output.getvalue()

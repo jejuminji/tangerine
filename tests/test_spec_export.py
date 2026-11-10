@@ -118,7 +118,8 @@ class SpecExportTests(unittest.TestCase):
         self.assertEqual(exported["H3"].alignment.horizontal, "center")
         self.assertEqual(exported.max_row, 4)
         self.assertEqual(exported["C4"].value, "총수량")
-        self.assertEqual(exported["D4"].value, 4)
+        self.assertEqual(exported["D4"].value, "=SUM(D2:D3)")
+        self.assertEqual(exported["D4"].data_type, "f")
         self.assertTrue(exported["D4"].font.bold)
         self.assertEqual(exported["D4"].font.color.rgb, "00000000")
         self.assertEqual(exported["D4"].number_format, "0")
@@ -127,6 +128,23 @@ class SpecExportTests(unittest.TestCase):
         self.assertFalse(exported.row_dimensions[4].hidden)
         self.assertIsNone(exported["B4"].value)
         self.assertIsNone(exported["H4"].value)
+
+    def test_total_formula_handles_empty_and_single_order_exports(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            template = Path(temporary) / "template.xlsx"
+            workbook = Workbook()
+            workbook.active.title = "Sheet2"
+            workbook.save(template)
+            for rows, total_cell, formula in (
+                ([], "D2", "=SUM(0)"),
+                ([make_order_row()], "D3", "=SUM(D2:D2)"),
+            ):
+                with self.subTest(total_cell=total_cell):
+                    with patch.object(app, "TEMPLATE_FILE", template):
+                        exported = load_workbook(BytesIO(app._build_template_excel(rows)))
+                    self.assertEqual(exported["Sheet2"][total_cell].value, formula)
+                    self.assertEqual(exported.calculation.calcMode, "auto")
+                    self.assertTrue(exported.calculation.fullCalcOnLoad)
 
     def test_preview_total_does_not_add_or_modify_orders(self):
         rows = [make_order_row(), make_order_row()]
